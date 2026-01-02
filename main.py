@@ -6,6 +6,8 @@ import threading
 import paho.mqtt.client as mqtt
 from collections import defaultdict
 
+#test comment
+
 # ------------------ Configuration ------------------
 READER_IP = "192.168.1.116"   # RFID reader's IP
 READER_PORT = 6000            # RFID reader's TCP port
