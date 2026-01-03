@@ -5,6 +5,7 @@ import json
 import threading
 import signal
 import sys
+import uuid
 import paho.mqtt.client as mqtt
 from collections import defaultdict
 
@@ -33,7 +34,10 @@ lock = threading.Lock()
 # ============================================
 
 # ================== MQTT SETUP ==================
-client = mqtt.Client(client_id="pi_reader", protocol=mqtt.MQTTv311)
+CLIENT_ID = f"pi_reader_{uuid.uuid4().hex[:8]}"
+client = mqtt.Client(client_id=CLIENT_ID, protocol=mqtt.MQTTv311)
+
+client.reconnect_delay_set(min_delay=1, max_delay=30)
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
@@ -88,7 +92,7 @@ def auto_green_timer():
 
         publish_current_count()
 
-        # wait for backend response (max 5s)
+        # wait for backend response (max 5 seconds)
         start = time.time()
         while backend_response is None and time.time() - start < 5:
             time.sleep(0.2)
