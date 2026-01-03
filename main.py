@@ -28,7 +28,9 @@ rfid_socket = None
 signal_phase = "RED"
 current_cycle_tags = set()
 last_seen = defaultdict(float)
+
 backend_response = None
+current_cycle_id = None   # 🔴 IMPORTANT
 
 lock = threading.Lock()
 # ============================================
@@ -36,7 +38,6 @@ lock = threading.Lock()
 # ================== MQTT SETUP ==================
 CLIENT_ID = f"pi_reader_{uuid.uuid4().hex[:8]}"
 client = mqtt.Client(client_id=CLIENT_ID, protocol=mqtt.MQTTv311)
-
 client.reconnect_delay_set(min_delay=1, max_delay=30)
 
 def on_connect(client, userdata, flags, rc):
@@ -49,9 +50,17 @@ def on_connect(client, userdata, flags, rc):
 
 def on_message(client, userdata, msg):
     global backend_response
+
     try:
-        backend_response = json.loads(msg.payload.decode())
-        print(f"🟢 Backend response received: {backend_response}")
+        data = json.loads(msg.payload.decode())
+
+        # 🔴 IGNORE OLD / RETAINED RESPONSES
+        if data.get("cycle_id") != current_cycle_id:
+            return
+
+        backend_response = data
+        print(f"🟢 Backend response received: {data}")
+
     except Exception as e:
         print(f"❌ MQTT message error: {e}")
 
@@ -66,15 +75,22 @@ client.on_disconnect = on_disconnect
 
 # ================== HELPERS ==================
 def publish_current_count():
+    global current_cycle_id
+
     with lock:
         if not client.is_connected():
             print("⚠️ MQTT not connected, skipping publish")
             return
 
         car_count = len(current_cycle_tags)
+
+        # 🔴 UNIQUE CYCLE ID
+        current_cycle_id = int(time.time() * 1000)
+
         payload = {
             "junction_id": 1,
-            "lane_counts": [30, 60, 100, car_count]
+            "lane_counts": [30, 60, 100, car_count],
+            "cycle_id": current_cycle_id
         }
 
         print(f"📤 Publishing car count: {payload}")
@@ -92,7 +108,7 @@ def auto_green_timer():
 
         publish_current_count()
 
-        # wait for backend response (max 5 seconds)
+        # ⏳ WAIT FOR MATCHING BACKEND RESPONSE (MAX 20s)
         start = time.time()
         while backend_response is None and time.time() - start < 20:
             time.sleep(0.2)
@@ -116,12 +132,12 @@ def rfid_worker():
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(5)
 
-            # ---- TCP KEEPALIVE (CRITICAL) ----
+            # ---- TCP KEEPALIVE ----
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-            # ---------------------------------
+            # -----------------------
 
             s.connect((READER_IP, READER_PORT))
             s.settimeout(1)
