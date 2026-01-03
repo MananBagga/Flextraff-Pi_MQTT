@@ -8,53 +8,46 @@ import sys
 import paho.mqtt.client as mqtt
 from collections import defaultdict
 
-# ------------------ Configuration ------------------
+# ================== CONFIG ==================
 READER_IP = "192.168.1.116"
 READER_PORT = 6000
 IGNORE_INTERVAL = 60
 GREEN_INTERVAL = 25
 
-running = True
-rfid_socket = None
-# ---------------------------------------------------
-
-# ------------------ MQTT Config --------------------
 BROKER = "broker.hivemq.com"
 PORT = 1883
 TOPIC_PUB = "flextraff/car_counts"
 TOPIC_SUB = "flextraff/green_times"
-# ---------------------------------------------------
+# ============================================
 
-client = mqtt.Client(client_id="pi_reader", protocol=mqtt.MQTTv311)
+# ================== GLOBALS ==================
+running = True
+rfid_socket = None
 
 signal_phase = "RED"
 current_cycle_tags = set()
 last_seen = defaultdict(float)
-lock = threading.Lock()
 backend_response = None
 
-# ---------------- MQTT Callbacks -------------------
+lock = threading.Lock()
+# ============================================
+
+# ================== MQTT SETUP ==================
+client = mqtt.Client(client_id="pi_reader", protocol=mqtt.MQTTv311)
+
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         print("✅ Connected to MQTT broker")
         client.subscribe(TOPIC_SUB, qos=1)
+        print(f"📡 Subscribed to {TOPIC_SUB}")
     else:
-        print(f"❌ MQTT connection failed (rc={rc})")
+        print(f"❌ MQTT connect failed (rc={rc})")
 
 def on_message(client, userdata, msg):
-    global signal_phase, current_cycle_tags, backend_response
+    global backend_response
     try:
-        data = json.loads(msg.payload.decode())
-        backend_response = data
-        print(f"🟢 Backend response: {data}")
-
-        with lock:
-            signal_phase = "GREEN"
-            green_times = data.get("green_times", [])
-            time.sleep(max(green_times) if green_times else 5)
-            signal_phase = "RED"
-            current_cycle_tags.clear()
-
+        backend_response = json.loads(msg.payload.decode())
+        print(f"🟢 Backend response received: {backend_response}")
     except Exception as e:
         print(f"❌ MQTT message error: {e}")
 
@@ -65,11 +58,13 @@ def on_disconnect(client, userdata, rc):
 client.on_connect = on_connect
 client.on_message = on_message
 client.on_disconnect = on_disconnect
+# ===============================================
 
-# ---------------- Helper Functions -----------------
+# ================== HELPERS ==================
 def publish_current_count():
     with lock:
         if not client.is_connected():
+            print("⚠️ MQTT not connected, skipping publish")
             return
 
         car_count = len(current_cycle_tags)
@@ -78,26 +73,36 @@ def publish_current_count():
             "lane_counts": [30, 60, 100, car_count]
         }
 
-        print(f"📤 Publishing count: {payload}")
+        print(f"📤 Publishing car count: {payload}")
         client.publish(TOPIC_PUB, json.dumps(payload), qos=1)
 
 def auto_green_timer():
     global signal_phase, backend_response
+
     while running:
         time.sleep(GREEN_INTERVAL)
+
+        print("\n🟩 GREEN phase triggered")
         with lock:
             signal_phase = "GREEN"
+
         publish_current_count()
-        time.sleep(3)
+
+        # wait for backend response (max 5s)
+        start = time.time()
+        while backend_response is None and time.time() - start < 5:
+            time.sleep(0.2)
+
         with lock:
             signal_phase = "RED"
             current_cycle_tags.clear()
             backend_response = None
+            print("🔴 Back to RED phase\n")
+# =============================================
 
-# ---------------- RFID Worker ----------------------
+# ================== RFID WORKER ==================
 def rfid_worker():
     global rfid_socket, running
-
     retry_delay = 1
 
     while running:
@@ -107,11 +112,12 @@ def rfid_worker():
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(5)
 
-            # 🔑 KEEPALIVE — VERY IMPORTANT
+            # ---- TCP KEEPALIVE (CRITICAL) ----
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            # ---------------------------------
 
             s.connect((READER_IP, READER_PORT))
             s.settimeout(1)
@@ -144,7 +150,7 @@ def rfid_worker():
                             if now - last_seen[epc] > IGNORE_INTERVAL:
                                 last_seen[epc] = now
                                 current_cycle_tags.add(epc)
-                                print(f"🆕 RFID: {epc}")
+                                print(f"🆕 RFID detected: {epc}")
 
                 except socket.timeout:
                     continue
@@ -163,8 +169,9 @@ def rfid_worker():
             print(f"🔁 Reconnecting RFID in {retry_delay}s")
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 60)
+# ===============================================
 
-# ---------------- Clean Shutdown -------------------
+# ================== CLEAN SHUTDOWN ==================
 def shutdown_handler(sig, frame):
     global running
     print("\n🛑 Shutting down cleanly")
@@ -183,10 +190,11 @@ def shutdown_handler(sig, frame):
 
 signal.signal(signal.SIGTERM, shutdown_handler)
 signal.signal(signal.SIGINT, shutdown_handler)
+# ===================================================
 
-# ---------------- Start Everything -----------------
+# ================== START EVERYTHING ==================
 print(f"🔗 Connecting to MQTT broker {BROKER}:{PORT}")
-client.connect(BROKER, PORT, keepalive=60)
+client.connect(BROKER, PORT, keepalive=120)
 client.loop_start()
 
 threading.Thread(target=auto_green_timer, daemon=True).start()
@@ -194,3 +202,4 @@ threading.Thread(target=rfid_worker, daemon=True).start()
 
 while True:
     time.sleep(1)
+# =====================================================
