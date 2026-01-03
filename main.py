@@ -94,7 +94,7 @@ def auto_green_timer():
 
         # wait for backend response (max 5 seconds)
         start = time.time()
-        while backend_response is None and time.time() - start < 5:
+        while backend_response is None and time.time() - start < 20:
             time.sleep(0.2)
 
         with lock:
